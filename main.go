@@ -3,9 +3,9 @@ package main
 import (
 	"archive/zip"
 	"bytes"
-	// "encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"time"
@@ -18,8 +18,6 @@ import (
 	"github.com/aws/aws-sdk-go/service/s3"
 )
 
-
-
 func main() {
 	lambda.Start(handler)
 }
@@ -28,20 +26,18 @@ func handler(request events.APIGatewayProxyRequest) (events.APIGatewayProxyRespo
 	log.Println("handler is working")
 
 	var payload struct {
-		Images []string `json:"images"`
+		ImageURLs []string `json:"imageUrls"`
 	}
 
 	err := json.Unmarshal([]byte(request.Body), &payload)
-	
 	if err != nil {
 		return events.APIGatewayProxyResponse{
 			StatusCode: http.StatusBadRequest,
 			Body:       "Invalid request body",
 		}, nil
 	}
-	
 
-	zipBuffer, err := createZipFromImages(payload.Images)
+	zipBuffer, err := createZipFromImageURLs(payload.ImageURLs)
 	if err != nil {
 		log.Println("Error creating zip:", err)
 		return events.APIGatewayProxyResponse{
@@ -67,16 +63,21 @@ func handler(request events.APIGatewayProxyRequest) (events.APIGatewayProxyRespo
 	return response, nil
 }
 
-func createZipFromImages(images []string) (*bytes.Buffer, error) {
+func createZipFromImageURLs(imageURLs []string) (*bytes.Buffer, error) {
 	buf := new(bytes.Buffer)
 	zipWriter := zip.NewWriter(buf)
-	
-	
-	for i, imgData := range images {
-		// decodedImage, err := base64.StdEncoding.DecodeString(imgData)
-		// if err != nil {
-		// 	return nil, fmt.Errorf("error decoding image %d: %v", i, err)
-		// }
+
+	for i, imageURL := range imageURLs {
+		resp, err := http.Get(imageURL)
+		if err != nil {
+			return nil, fmt.Errorf("error fetching image %d: %v", i, err)
+		}
+		defer resp.Body.Close()
+
+		imgData, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return nil, fmt.Errorf("error reading image %d: %v", i, err)
+		}
 
 		imgFileName := fmt.Sprintf("image_%d.jpg", i)
 		zipFileWriter, err := zipWriter.Create(imgFileName)
@@ -84,7 +85,7 @@ func createZipFromImages(images []string) (*bytes.Buffer, error) {
 			return nil, fmt.Errorf("error creating zip entry for image %d: %v", i, err)
 		}
 
-		_, err = zipFileWriter.Write([]byte(imgData))
+		_, err = zipFileWriter.Write(imgData)
 		if err != nil {
 			return nil, fmt.Errorf("error writing image %d to zip: %v", i, err)
 		}
@@ -100,18 +101,22 @@ func createZipFromImages(images []string) (*bytes.Buffer, error) {
 
 func uploadToS3(zipBuffer *bytes.Buffer) (string, error) {
 	const (
-        REGION               = ""
-        AWS_ACCESS_KEY_ID    = ""
-        AWS_SECRET_ACCESS_KEY = ""
-        AWS_IMAGE_BUCKET     = ""
-    )
+		REGION                = ""
+		AWS_ACCESS_KEY_ID     = ""
+		AWS_SECRET_ACCESS_KEY = ""
+		AWS_IMAGE_BUCKET      = ""
+	)
 
 	sess, err := session.NewSessionWithOptions(session.Options{
-        Config: aws.Config{
-            Region:      aws.String(REGION),
-            Credentials: credentials.NewStaticCredentials(AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, ""),
-        },
-    })
+		Config: aws.Config{
+			Region:      aws.String(REGION),
+			Credentials: credentials.NewStaticCredentials(AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, ""),
+		},
+	})
+
+	if err != nil {
+		return "", fmt.Errorf("error creating AWS session: %v", err)
+	}
 
 	svc := s3.New(sess)
 
@@ -124,7 +129,7 @@ func uploadToS3(zipBuffer *bytes.Buffer) (string, error) {
 	})
 
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("error uploading to S3: %v", err)
 	}
 
 	s3URL := fmt.Sprintf("https://%s.s3.%s.amazonaws.com/%s", AWS_IMAGE_BUCKET, REGION, fileName)
